@@ -1,5 +1,6 @@
 youtube-audio-bot
 
+```
 services:
   bot:
     image: tslcat/youtube-audio-bot:latest
@@ -9,3 +10,4 @@ services:
     restart: unless-stopped
     volumes:
       - /root/downloads:/tmp/downloads  # 可选：持久化下载目录（调试用）
+```
