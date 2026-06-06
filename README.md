@@ -1,5 +1,6 @@
 youtube-audio-bot
 
+docker-compose.yml 安装
 ```
 services:
   bot:
