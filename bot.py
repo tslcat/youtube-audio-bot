@@ -36,29 +36,34 @@ def main_keyboard():
         [KeyboardButton("📋 查看定时任务"), KeyboardButton("❌ 取消定时任务")],
         [KeyboardButton("❓ 帮助")]
     ]
-    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("👋 YouTube 音频 Bot\n请选择功能：", reply_markup=main_keyboard())
+    await update.message.reply_text(
+        "👋 YouTube 音频 Bot\n请选择功能：", 
+        reply_markup=main_keyboard()
+    )
 
-# ==================== 下载函数（已修复文件名过长问题） ====================
+# ==================== 下载函数 ====================
 async def download_audio(update: Update, context: ContextTypes.DEFAULT_TYPE, url=None, is_scheduled=False):
     if not url and update:
         url = update.message.text.strip()
 
     if not url or not ("youtube.com" in url or "youtu.be" in url):
         if update:
-            await update.message.reply_text("❌ 请发送有效 YouTube 链接", reply_markup=main_keyboard())
+            await update.message.reply_text(
+                "❌ 请发送有效 YouTube 链接", 
+                reply_markup=main_keyboard()
+            )
         return
 
-    msg = await update.message.reply_text("⏳ 正在处理...") if update else None
+    msg = await update.message.reply_text("⏳ 正在处理...", reply_markup=main_keyboard()) if update else None
 
     try:
         with TemporaryDirectory(dir="/tmp") as tmpdir:
-            # 关键修复：使用短文件名 + 清理非法字符
             ydl_opts = {
                 'format': 'bestaudio/best',
-                'outtmpl': f'{tmpdir}/%(id)s_%(title).80s.%(ext)s',  # 限制标题长度
+                'outtmpl': f'{tmpdir}/%(id)s_%(title).80s.%(ext)s',
                 'postprocessors': [{
                     'key': 'FFmpegExtractAudio',
                     'preferredcodec': 'mp3',
@@ -68,13 +73,12 @@ async def download_audio(update: Update, context: ContextTypes.DEFAULT_TYPE, url
                 'noplaylist': True,
                 'socket_timeout': 30,
                 'retries': 3,
-                'restrictfilenames': True,        # 清理非法字符
-                'windowsfilenames': True,         # 兼容性更好
+                'restrictfilenames': True,
+                'windowsfilenames': True,
             }
 
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=True)
-                # 安全处理文件名
                 filename = ydl.prepare_filename(info)
                 if not filename.endswith('.mp3'):
                     filename = os.path.splitext(filename)[0] + '.mp3'
@@ -82,18 +86,15 @@ async def download_audio(update: Update, context: ContextTypes.DEFAULT_TYPE, url
             file_size = os.path.getsize(filename) / (1024 * 1024)
             title = info.get('title', '音频')
 
-            # 发送文件
             send_kwargs = {
                 'chat_id': update.effective_chat.id,
                 'filename': os.path.basename(filename),
-                'caption': f"🎵 {title}\n🔗 {url}"
+                'caption': f"🎵 {title}\n🔗 {url}",
+                'reply_markup': main_keyboard()   # ← 关键：始终显示菜单
             }
 
             if file_size > 48:
-                await context.bot.send_document(
-                    document=open(filename, 'rb'),
-                    **send_kwargs
-                )
+                await context.bot.send_document(document=open(filename, 'rb'), **send_kwargs)
             else:
                 await context.bot.send_audio(
                     audio=open(filename, 'rb'),
@@ -103,20 +104,26 @@ async def download_audio(update: Update, context: ContextTypes.DEFAULT_TYPE, url
 
             os.remove(filename)
             if msg:
-                await msg.edit_text("✅ 发送完成！")
+                await msg.edit_text("✅ 发送完成！", reply_markup=main_keyboard())
 
     except Exception as e:
         logger.error(f"Download error: {e}")
         error_msg = str(e)[:150]
         if msg:
-            await msg.edit_text(f"❌ 处理失败：{error_msg}")
+            await msg.edit_text(f"❌ 处理失败：{error_msg}", reply_markup=main_keyboard())
+        elif update:
+            await update.message.reply_text(f"❌ 处理失败：{error_msg}", reply_markup=main_keyboard())
 
 # ==================== 定时任务 ====================
 async def scheduled_download(context: ContextTypes.DEFAULT_TYPE):
     data = load_data(DATA_FILE)
     for chat_id, channel_url in list(data.items()):
         try:
-            await context.bot.send_message(int(chat_id), "🔄 检查频道最新视频...")
+            await context.bot.send_message(
+                int(chat_id), 
+                "🔄 检查频道最新视频...",
+                reply_markup=main_keyboard()
+            )
 
             ydl_opts = {
                 'quiet': True,
@@ -140,21 +147,31 @@ async def scheduled_download(context: ContextTypes.DEFAULT_TYPE):
                 if latest_id in history[chat_id]:
                     continue
 
-                # 更新历史记录
                 history[chat_id].append(latest_id)
-                # 只保留最近30条记录
                 if len(history[chat_id]) > 30:
                     history[chat_id] = history[chat_id][-30:]
                 save_data(history, HISTORY_FILE)
 
-                await context.bot.send_message(int(chat_id), f"🆕 发现新视频，开始下载...")
+                await context.bot.send_message(
+                    int(chat_id), 
+                    f"🆕 发现新视频，开始下载...",
+                    reply_markup=main_keyboard()
+                )
                 await download_audio(None, context, url=latest_url, is_scheduled=True)
             else:
-                await context.bot.send_message(int(chat_id), "⚠️ 未找到最新视频")
+                await context.bot.send_message(
+                    int(chat_id), 
+                    "⚠️ 未找到最新视频",
+                    reply_markup=main_keyboard()
+                )
         except Exception as e:
             logger.error(f"Scheduled error for {chat_id}: {e}")
             try:
-                await context.bot.send_message(int(chat_id), "⚠️ 定时任务出错，稍后自动重试")
+                await context.bot.send_message(
+                    int(chat_id), 
+                    "⚠️ 定时任务出错，稍后自动重试",
+                    reply_markup=main_keyboard()
+                )
             except:
                 pass
 
@@ -163,7 +180,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
 
     if text in ["📥 立即下载音频", "立即下载音频"]:
-        await update.message.reply_text("请发送 YouTube 视频链接：", reply_markup=main_keyboard())
+        await update.message.reply_text(
+            "请发送 YouTube 视频链接：", 
+            reply_markup=main_keyboard()
+        )
 
     elif text in ["⏰ 设置定时下载", "设置定时下载"]:
         await update.message.reply_text(
@@ -173,10 +193,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif text in ["📋 查看定时任务", "查看定时任务"]:
         data = load_data(DATA_FILE)
-        if data:
-            msg = "📋 当前定时任务：\n" + "\n".join([f"• {v}" for v in data.values()])
-        else:
-            msg = "暂无定时任务"
+        msg = "📋 当前定时任务：\n" + "\n".join([f"• {v}" for v in data.values()]) if data else "暂无定时任务"
         await update.message.reply_text(msg, reply_markup=main_keyboard())
 
     elif text in ["❌ 取消定时任务", "取消定时任务"]:
@@ -196,7 +213,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await download_audio(update, context, url=text)
 
     else:
-        await update.message.reply_text("请选择菜单或发送链接", reply_markup=main_keyboard())
+        await update.message.reply_text(
+            "请选择菜单或发送链接", 
+            reply_markup=main_keyboard()
+        )
 
 def main():
     app = Application.builder().token(TOKEN.strip()).build()
@@ -204,11 +224,10 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    # 定时任务（每天执行一次）
     if app.job_queue:
         app.job_queue.run_repeating(scheduled_download, interval=86400, first=10)
 
-    print("🤖 YouTube 音频 Bot 已启动 | 文件名过长问题已修复")
+    print("🤖 YouTube 音频 Bot 已启动 | 菜单始终显示 + 文件名问题已修复")
     app.run_polling()
 
 if __name__ == '__main__':
