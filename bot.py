@@ -44,11 +44,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ==================== 进度回调 ====================
 def progress_hook(d):
     if d['status'] == 'downloading':
-        logger.info(f"下载进度: {d.get('_percent_str', 'N/A')} - {d.get('_eta_str', 'N/A')}")
+        logger.info(f"[下载进度] {d.get('_percent_str', 'N/A')} {d.get('_eta_str', '')}")
     elif d['status'] == 'finished':
-        logger.info("下载完成，正在转换格式...")
+        logger.info("[yt-dlp] 下载完成，正在转 MP3...")
 
-# ==================== 下载函数（加强版） ====================
+# ==================== 下载函数（长视频 + 大文件优化） ====================
 async def download_audio(update: Update, context: ContextTypes.DEFAULT_TYPE, url=None, is_scheduled=False):
     if not url and update:
         url = update.message.text.strip()
@@ -58,63 +58,71 @@ async def download_audio(update: Update, context: ContextTypes.DEFAULT_TYPE, url
             await update.message.reply_text("❌ 请发送有效 YouTube 链接", reply_markup=main_keyboard())
         return
 
-    msg = await update.message.reply_text("⏳ 正在处理（可能需要 30-90 秒）...", reply_markup=main_keyboard())
+    msg = await update.message.reply_text("⏳ 正在处理（长视频可能需要 2-8 分钟）...", reply_markup=main_keyboard())
 
     try:
         with TemporaryDirectory(dir="/tmp") as tmpdir:
+            quality = '64' if is_scheduled else '96'
             ydl_opts = {
                 'format': 'bestaudio/best',
-                'outtmpl': f'{tmpdir}/%(id)s_%(title).80s.%(ext)s',   # 短文件名
+                'outtmpl': f'{tmpdir}/%(id)s_%(title).100s.%(ext)s',
                 'postprocessors': [{
                     'key': 'FFmpegExtractAudio',
                     'preferredcodec': 'mp3',
-                    'preferredquality': '64' if is_scheduled else '96',
+                    'preferredquality': quality,
+                    'postprocessor_args': ['-threads', '0', '-preset', 'fast', '-q:a', quality]
                 }],
-                'quiet': False,                    # 改为 False 显示更多信息
+                'quiet': False,
                 'noplaylist': True,
-                'socket_timeout': 60,
+                'socket_timeout': 180,
                 'retries': 5,
+                'extractor_retries': 5,
+                'concurrent_fragment_downloads': 8,   # 大幅加速长视频下载
+                'progress_hooks': [progress_hook],
                 'restrictfilenames': True,
                 'windowsfilenames': True,
-                'progress_hooks': [progress_hook],  # 添加进度
-                'extractor_retries': 3,
             }
 
             logger.info(f"开始下载: {url}")
-            
+            await msg.edit_text("⬇️ 正在下载音频流...", reply_markup=main_keyboard())
+
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=True)
                 filename = ydl.prepare_filename(info)
                 if not filename.endswith('.mp3'):
                     filename = os.path.splitext(filename)[0] + '.mp3'
 
-            logger.info(f"下载完成，文件大小: {os.path.getsize(filename) / (1024*1024):.1f} MB")
-
-            file_size = os.path.getsize(filename) / (1024 * 1024)
+            file_size_mb = os.path.getsize(filename) / (1024 * 1024)
             title = info.get('title', '音频')
+            duration = info.get('duration', 0) // 60
 
+            logger.info(f"下载完成 → 文件大小: {file_size_mb:.1f}MB，时长: {duration}分钟")
+
+            await msg.edit_text(f"✅ 下载完成（{file_size_mb:.1f}MB），正在上传...", reply_markup=main_keyboard())
+
+            # 发送参数（关键：增加超时防止卡住）
             send_kwargs = {
                 'chat_id': update.effective_chat.id,
                 'filename': os.path.basename(filename),
-                'caption': f"🎵 {title}\n🔗 {url}",
-                'reply_markup': main_keyboard()
+                'caption': f"🎵 {title}\n⏱ {duration}分钟\n🔗 {url}",
+                'reply_markup': main_keyboard(),
+                'read_timeout': 300,
+                'write_timeout': 300,
+                'connect_timeout': 60
             }
 
-            if file_size > 48:
+            if file_size_mb > 48:
                 await context.bot.send_document(document=open(filename, 'rb'), **send_kwargs)
             else:
                 await context.bot.send_audio(audio=open(filename, 'rb'), title=title, **send_kwargs)
 
             os.remove(filename)
-            await msg.edit_text("✅ 发送完成！", reply_markup=main_keyboard())
+            await msg.edit_text(f"✅ 发送完成！\n🎵 {title} ({duration}分钟)", reply_markup=main_keyboard())
 
-    except asyncio.TimeoutError:
-        logger.error("下载超时")
-        await msg.edit_text("⏱️ 下载超时，请稍后重试", reply_markup=main_keyboard())
     except Exception as e:
         logger.error(f"Download error: {str(e)}", exc_info=True)
         error_msg = str(e)[:200]
-        await msg.edit_text(f"❌ 处理失败：{error_msg}", reply_markup=main_keyboard())
+        await msg.edit_text(f"❌ 处理失败：{error_msg}\n💡 建议：极长视频可尝试定时任务模式", reply_markup=main_keyboard())
 
 # ==================== 定时任务 ====================
 async def scheduled_download(context: ContextTypes.DEFAULT_TYPE):
@@ -127,7 +135,7 @@ async def scheduled_download(context: ContextTypes.DEFAULT_TYPE):
                 'quiet': True,
                 'extract_flat': True,
                 'playlist_items': '1',
-                'socket_timeout': 30,
+                'socket_timeout': 60,
                 'retries': 3
             }
 
@@ -157,11 +165,11 @@ async def scheduled_download(context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.error(f"Scheduled error for {chat_id}: {e}")
             try:
-                await context.bot.send_message(int(chat_id), "⚠️ 定时任务出错", reply_markup=main_keyboard())
+                await context.bot.send_message(int(chat_id), "⚠️ 定时任务出错，稍后重试", reply_markup=main_keyboard())
             except:
                 pass
 
-# ==================== 菜单处理（保持不变） ====================
+# ==================== 菜单处理 ====================
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
 
@@ -169,7 +177,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("请发送 YouTube 视频链接：", reply_markup=main_keyboard())
 
     elif text in ["⏰ 设置定时下载", "设置定时下载"]:
-        await update.message.reply_text("✅ 请直接发送**频道链接**（例如 https://www.youtube.com/@xxxx）", reply_markup=main_keyboard())
+        await update.message.reply_text(
+            "✅ 请直接发送**频道链接**（例如 https://www.youtube.com/@xxxx）", 
+            reply_markup=main_keyboard()
+        )
 
     elif text in ["📋 查看定时任务", "查看定时任务"]:
         data = load_data(DATA_FILE)
@@ -196,7 +207,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("请选择菜单或发送链接", reply_markup=main_keyboard())
 
 def main():
-    app = Application.builder().token(TOKEN.strip()).build()
+    # 全局网络超时设置
+    app = Application.builder().token(TOKEN.strip()) \
+        .read_timeout(300) \
+        .write_timeout(300) \
+        .connect_timeout(60) \
+        .pool_timeout(300) \
+        .build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
@@ -204,7 +221,7 @@ def main():
     if app.job_queue:
         app.job_queue.run_repeating(scheduled_download, interval=86400, first=10)
 
-    print("🤖 Bot 已启动 | 下载卡住问题已优化")
+    print("🤖 YouTube 音频 Bot 已启动 | 长视频 + 大文件上传优化完成")
     app.run_polling()
 
 if __name__ == '__main__':
